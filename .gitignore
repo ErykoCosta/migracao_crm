@@ -1,0 +1,8 @@
+﻿.env
+downloads/
+*.json
+*.log
+__pycache__/
+*.xlsx
+teste_saida/
+teste_*.py
