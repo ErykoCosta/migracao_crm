@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import unicodedata
 from pathlib import Path
 
@@ -307,6 +308,212 @@ def salvar_relatorio(registros: list[dict], destino: Path = RELATORIO_SAIDA) -> 
     df.to_excel(destino, index=False, engine="openpyxl")
 
 
+def diagnosticar_problema(contexto: str, erro_ou_status: str, detalhe: str = "") -> dict:
+    """Traduz erros técnicos e falhas de fluxo para explicação simples e alternativas."""
+    texto_completo = f"{contexto} {erro_ou_status} {detalhe}".lower()
+
+    if contexto == "conexao_chrome" or "connect_over_cdp" in texto_completo or "9222" in texto_completo:
+        return {
+            "titulo": "Não foi possível conectar ao Chrome de automação",
+            "o_que_ocorreu": (
+                "O script tentou se conectar ao Chrome já logado na porta 9222, "
+                "mas não encontrou o navegador aberto nesse modo."
+            ),
+            "como_identificar": (
+                "Verifique se você abriu o navegador pelo arquivo 'abrir_chrome_9222.bat' "
+                "e se a janela do Chrome continua aberta (um Chrome comum aberto fora do .bat não funciona)."
+            ),
+            "alternativas": [
+                "Dê dois cliques em 'abrir_chrome_9222.bat', faça login no AdvBox e no Juridiq e rode 'python migracao_crm.py' novamente.",
+                "Ou rode 'python migracao_crm.py --novo-navegador' para o script abrir um navegador novo e esperar seu login manual.",
+            ],
+        }
+
+    if "permission" in texto_completo or "permissionerror" in texto_completo or contexto == "planilha":
+        return {
+            "titulo": "Planilha bloqueada ou inacessível",
+            "o_que_ocorreu": (
+                "O Windows bloqueou a leitura ou gravação da planilha, provavelmente porque ela "
+                "está aberta em outro programa (como o Excel)."
+            ),
+            "como_identificar": (
+                "Olhe na barra de tarefas do Windows se 'PLANILHA DE CADASTRO.xlsx' ou "
+                "'status_migracao.xlsx' está aberta no Excel."
+            ),
+            "alternativas": [
+                "Feche a planilha no Excel (salvando antes se precisar) e tente novamente.",
+                "Confira também se o arquivo existe na pasta correta e não está marcado como somente leitura.",
+            ],
+        }
+
+    if "nenhum documento na nuvem" in texto_completo:
+        return {
+            "titulo": "Cliente sem arquivos na nuvem do AdvBox",
+            "o_que_ocorreu": (
+                "O cliente foi encontrado no AdvBox, mas a aba de arquivos (nuvem) dele estava vazia."
+            ),
+            "como_identificar": (
+                "Abra o cadastro desse cliente no AdvBox e clique no ícone da nuvem para confirmar "
+                "se não existe mesmo nenhum documento anexado (ou se está em outra área)."
+            ),
+            "alternativas": [
+                "Se esse cliente realmente não tiver documentos, escolha [2] para deixar 'pendente' (ou [3] se já considerar concluído) e seguir para o próximo.",
+                "Se os documentos estiverem em outra tela, envie manualmente no Juridiq e escolha [3].",
+            ],
+        }
+
+    if erro_ou_status == "Não encontrado":
+        crm_onde = "CRM de Origem (AdvBox)" if "origem" in texto_completo else "CRM de Destino (Juridiq)"
+        return {
+            "titulo": f"Cliente não encontrado no {crm_onde}",
+            "o_que_ocorreu": (
+                f"A pesquisa pelo nome exato do cliente não retornou nenhum cadastro no {crm_onde}."
+            ),
+            "como_identificar": (
+                f"Busque esse cliente manualmente no {crm_onde} para ver se há erro de digitação, "
+                "abreviação diferente na planilha ou se o cliente ainda não foi cadastrado lá."
+            ),
+            "alternativas": [
+                "Corrija o nome na planilha ou crie/ajuste o cadastro no CRM e escolha [1] para tentar novamente.",
+                "Ou escolha [2] para deixar este cliente como 'pendente' e continuar o lote pelos próximos clientes.",
+            ],
+        }
+
+    if "ambigu" in erro_ou_status.lower():
+        crm_onde = "CRM de Origem (AdvBox)" if "origem" in texto_completo else "CRM de Destino (Juridiq)"
+        return {
+            "titulo": f"Mais de um cliente com nome parecido no {crm_onde}",
+            "o_que_ocorreu": (
+                f"Apareceram vários resultados no {crm_onde} e não foi possível garantir qual é o cadastro certo. "
+                "O script parou por segurança para não misturar documentos entre clientes."
+            ),
+            "como_identificar": (
+                f"Pesquise esse nome no {crm_onde} e confira pelo CPF qual cadastro pertence ao cliente correto."
+            ),
+            "alternativas": [
+                "Faça a migração deste cliente manualmente no navegador conferindo o CPF e escolha [3] para marcar como concluído e seguir.",
+                "Ou escolha [2] para deixar como 'pendente' na planilha e continuar o lote pelos demais clientes.",
+            ],
+        }
+
+    if erro_ou_status in ("Erro no download", "Erro no upload"):
+        etapa_txt = "baixar da Origem (AdvBox)" if erro_ou_status == "Erro no download" else "enviar para o Destino (Juridiq)"
+        return {
+            "titulo": f"Falha parcial ao {etapa_txt}",
+            "o_que_ocorreu": (
+                f"Nem todos os documentos do cliente puderam ser confirmados ao {etapa_txt}. Detalhe: {detalhe}"
+            ),
+            "como_identificar": (
+                "Confira a pasta './downloads/<nome_cliente>' e a aba 'Arquivos' do cliente no Juridiq "
+                "para ver qual arquivo ficou faltando."
+            ),
+            "alternativas": [
+                "Verifique a conexão/login no Chrome e escolha [1] para tentar este cliente novamente (arquivos já anexos com o mesmo nome são ignorados sem duplicar).",
+                "Ou envie manualmente os arquivos que faltaram pela aba do navegador e escolha [3].",
+            ],
+        }
+
+    if "timeout" in texto_completo or "waiting for" in texto_completo:
+        return {
+            "titulo": "A página demorou demais para responder",
+            "o_que_ocorreu": (
+                "Um botão, lista ou tela do CRM não carregou dentro do tempo limite esperado."
+            ),
+            "como_identificar": (
+                "Olhe para a janela do Chrome neste momento: veja se o sistema deslogou (pedindo senha), "
+                "se a internet caiu ou se algum aviso/pop-up ficou na frente bloqueando a tela."
+            ),
+            "alternativas": [
+                "Se tiver deslogado ou travado num aviso, resolva direto na janela do Chrome e escolha [1] para tentar este cliente novamente.",
+                "Ou escolha [4] para parar, revise a janela do Chrome e rode 'python migracao_crm.py' depois (clientes concluídos serão pulados).",
+            ],
+        }
+
+    return {
+        "titulo": "Erro inesperado durante a migração",
+        "o_que_ocorreu": f"Aconteceu uma falha inesperada: {detalhe or erro_ou_status}",
+        "como_identificar": (
+            "Olhe na janela do Chrome em qual tela parou e confira os detalhes completos no arquivo 'migracao_crm.log'."
+        ),
+        "alternativas": [
+            "Verifique se as duas abas (AdvBox e Juridiq) continuam abertas e logadas no Chrome e escolha [1] para tentar novamente.",
+            "Ou escolha [2] para deixar este cliente como 'pendente' e seguir, ou [4] para parar o script agora.",
+        ],
+    }
+
+
+def exibir_painel_erro(titulo_contexto: str, diag: dict, logger: logging.Logger) -> None:
+    """Exibe e registra no log um resumo simples do erro com orientações e alternativas."""
+    linhas = [
+        "",
+        "=" * 72,
+        f"[PARADA POR ERRO] {titulo_contexto} -> {diag['titulo']}",
+        "=" * 72,
+        "O QUE OCORREU DE INESPERADO:",
+        f"  {diag['o_que_ocorreu']}",
+        "",
+        "COMO IDENTIFICAR O PROBLEMA:",
+        f"  {diag['como_identificar']}",
+        "",
+        "ALTERNATIVAS PARA RESOLVER:",
+    ]
+    for idx, alt in enumerate(diag["alternativas"], start=1):
+        linhas.append(f"  {idx}. {alt}")
+    linhas.append("=" * 72)
+    bloco = "\n".join(linhas)
+    print(bloco)
+    logger.error("%s | %s | %s", titulo_contexto, diag["titulo"], diag["o_que_ocorreu"])
+
+
+def tratar_parada_erro(
+    cli: dict,
+    reg: dict,
+    caminho_planilha: Path,
+    eh_cadastro: bool,
+    registros: list[dict],
+    logger: logging.Logger,
+    nao_interativo: bool,
+) -> str:
+    """Salva o progresso, explica o erro ao usuário e pergunta como prosseguir."""
+    nome = cli["nome_cliente"]
+    diag = diagnosticar_problema("migracao", reg["status"], reg["observacao"])
+    exibir_painel_erro(f"{nome} ({cli['aba']} linha {cli['linha_excel']})", diag, logger)
+
+    if nao_interativo or not sys.stdin.isatty():
+        print(
+            "\nScript interrompido para sua verificação. "
+            "Após resolver, rode novamente: python migracao_crm.py"
+        )
+        return "parar"
+
+    print("\nO que deseja fazer agora?")
+    print("  [1] Já resolvi — tentar novamente este mesmo cliente")
+    print("  [2] Deixar como 'pendente' e continuar para o próximo cliente")
+    print("  [3] Já resolvi manualmente no CRM — marcar como 'concluido' e continuar")
+    print("  [4] Parar e encerrar o script agora (padrão)")
+    escolha = input("Escolha [1/2/3/4]: ").strip()
+
+    if escolha == "1":
+        return "tentar_novamente"
+    if escolha == "2":
+        return "proximo"
+    if escolha == "3":
+        reg["status"] = "Concluído"
+        reg["observacao"] = "Concluído manualmente pelo usuário após parada assistida"
+        salvar_relatorio(registros)
+        if eh_cadastro:
+            try:
+                atualizar_etapa_cliente(caminho_planilha, cli["aba"], cli["linha_excel"], "concluido")
+            except PermissionError:
+                diag_perm = diagnosticar_problema("planilha", "PermissionError", str(caminho_planilha))
+                exibir_painel_erro("Gravação na planilha", diag_perm, logger)
+                return "parar"
+        return "proximo"
+
+    print("\nExecução encerrada. Quando estiver pronto para retomar, execute: python migracao_crm.py")
+    return "parar"
+
+
 def migrar_cliente(
     ctx,
     pg_origem,
@@ -354,6 +561,11 @@ def parse_args():
         action="store_true",
         help="Abre uma nova janela do Chromium (headless=False) para login manual em vez de usar porta 9222",
     )
+    parser.add_argument(
+        "--nao-interativo",
+        action="store_true",
+        help="Em caso de erro, exibe o diagnóstico e encerra imediatamente sem perguntar no terminal",
+    )
     return parser.parse_args()
 
 
@@ -367,11 +579,17 @@ def main() -> None:
     url_origem = resolver_url("ORIGEM_URL", ORIGEM_URL_PADRAO)
     url_destino = resolver_url("DESTINO_URL", DESTINO_URL_PADRAO)
 
-    clientes, eh_cadastro = carregar_clientes(
-        caminho_planilha,
-        tuple(args.abas),
-        reprocessar_concluidos=args.reprocessar_concluidos,
-    )
+    try:
+        clientes, eh_cadastro = carregar_clientes(
+            caminho_planilha,
+            tuple(args.abas),
+            reprocessar_concluidos=args.reprocessar_concluidos,
+        )
+    except Exception as ex:
+        diag = diagnosticar_problema("planilha", type(ex).__name__, str(ex))
+        exibir_painel_erro("Leitura da planilha de entrada", diag, logger)
+        sys.exit(1)
+
     if args.cliente:
         alvo = normalizar_texto(args.cliente)
         clientes = [c for c in clientes if normalizar_texto(c["nome_cliente"]) == alvo]
@@ -385,60 +603,107 @@ def main() -> None:
         return
 
     registros: list[dict] = []
+    parar_lote = False
     with sync_playwright() as p:
-        if args.novo_navegador:
-            browser = p.chromium.launch(headless=False)
-            ctx = browser.new_context(accept_downloads=True)
-            pg_origem = obter_ou_abrir_pagina(ctx, "advbox", url_origem)
-            pg_destino = obter_ou_abrir_pagina(ctx, "juridiq", url_destino)
-            input("Faça login manual nos dois CRMs (AdvBox e Juridiq) e pressione ENTER para iniciar... ")
-        else:
-            cdp_url = os.getenv("CHROME_CDP_URL", "http://localhost:9222")
-            browser = p.chromium.connect_over_cdp(cdp_url)
-            ctx = browser.contexts[0]
-            pg_origem = obter_ou_abrir_pagina(ctx, "advbox", url_origem)
-            pg_destino = obter_ou_abrir_pagina(ctx, "juridiq", url_destino)
+        try:
+            if args.novo_navegador:
+                browser = p.chromium.launch(headless=False)
+                ctx = browser.new_context(accept_downloads=True)
+                pg_origem = obter_ou_abrir_pagina(ctx, "advbox", url_origem)
+                pg_destino = obter_ou_abrir_pagina(ctx, "juridiq", url_destino)
+                input("Faça login manual nos dois CRMs (AdvBox e Juridiq) e pressione ENTER para iniciar... ")
+            else:
+                cdp_url = os.getenv("CHROME_CDP_URL", "http://localhost:9222")
+                browser = p.chromium.connect_over_cdp(cdp_url)
+                ctx = browser.contexts[0]
+                pg_origem = obter_ou_abrir_pagina(ctx, "advbox", url_origem)
+                pg_destino = obter_ou_abrir_pagina(ctx, "juridiq", url_destino)
+        except Exception as ex:
+            diag = diagnosticar_problema("conexao_chrome", type(ex).__name__, str(ex))
+            exibir_painel_erro("Conexão com o navegador Chrome", diag, logger)
+            sys.exit(1)
 
         try:
             for pos, cli in enumerate(clientes, start=1):
                 nome = cli["nome_cliente"]
-                logger.info("[%d/%d] Processando (%s linha %d): %s", pos, len(clientes), cli["aba"], cli["linha_excel"], nome)
-                try:
-                    etapa, reg = migrar_cliente(ctx, pg_origem, pg_destino, url_origem, url_destino, nome, logger)
-                except Exception as ex:
-                    logger.exception("Erro inesperado ao processar %s", nome)
-                    etapa = "pendente"
-                    reg = {
-                        "nome_cliente": nome,
-                        "status": "Erro",
-                        "arquivos_transferidos": 0,
-                        "observacao": f"Exceção: {ex}",
-                    }
-
-                registros.append(reg)
-                salvar_relatorio(registros)
-                if eh_cadastro:
+                indice_reg = None
+                while True:
+                    logger.info(
+                        "[%d/%d] Processando (%s linha %d): %s",
+                        pos,
+                        len(clientes),
+                        cli["aba"],
+                        cli["linha_excel"],
+                        nome,
+                    )
                     try:
-                        atualizar_etapa_cliente(caminho_planilha, cli["aba"], cli["linha_excel"], etapa)
-                    except PermissionError:
-                        logger.error(
-                            "Não foi possível salvar '%s' (feche a planilha no Excel!). Etapa do cliente %s seria '%s'.",
-                            caminho_planilha,
-                            nome,
-                            etapa,
+                        etapa, reg = migrar_cliente(
+                            ctx, pg_origem, pg_destino, url_origem, url_destino, nome, logger
                         )
-                logger.info(
-                    "[%d/%d] Finalizado %s -> Etapa=%s | Status=%s | Arquivos=%s | %s",
-                    pos,
-                    len(clientes),
-                    nome,
-                    etapa,
-                    reg["status"],
-                    reg["arquivos_transferidos"],
-                    reg["observacao"],
-                )
+                    except Exception as ex:
+                        logger.exception("Erro inesperado ao processar %s", nome)
+                        etapa = "pendente"
+                        reg = {
+                            "nome_cliente": nome,
+                            "status": "Erro",
+                            "arquivos_transferidos": 0,
+                            "observacao": f"{type(ex).__name__}: {ex}",
+                        }
+
+                    if indice_reg is None:
+                        registros.append(reg)
+                        indice_reg = len(registros) - 1
+                    else:
+                        registros[indice_reg] = reg
+
+                    try:
+                        salvar_relatorio(registros)
+                        if eh_cadastro:
+                            atualizar_etapa_cliente(caminho_planilha, cli["aba"], cli["linha_excel"], etapa)
+                    except PermissionError as ex:
+                        diag = diagnosticar_problema("planilha", "PermissionError", str(ex))
+                        exibir_painel_erro(f"Gravação da planilha ({nome})", diag, logger)
+                        parar_lote = True
+                        break
+
+                    logger.info(
+                        "[%d/%d] Finalizado %s -> Etapa=%s | Status=%s | Arquivos=%s | %s",
+                        pos,
+                        len(clientes),
+                        nome,
+                        etapa,
+                        reg["status"],
+                        reg["arquivos_transferidos"],
+                        reg["observacao"],
+                    )
+
+                    if etapa == "concluido":
+                        break
+
+                    acao = tratar_parada_erro(
+                        cli,
+                        reg,
+                        caminho_planilha,
+                        eh_cadastro,
+                        registros,
+                        logger,
+                        args.nao_interativo,
+                    )
+                    if acao == "tentar_novamente":
+                        continue
+                    if acao == "proximo":
+                        break
+                    parar_lote = True
+                    break
+
+                if parar_lote:
+                    break
         finally:
             browser.close()
+
+    if parar_lote:
+        logger.warning("Execução interrompida após erro. Relatório parcial salvo em %s", RELATORIO_SAIDA.resolve())
+        sys.exit(1)
 
     logger.info("Lote encerrado. Relatório salvo em %s", RELATORIO_SAIDA.resolve())
 
