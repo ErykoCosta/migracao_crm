@@ -117,6 +117,7 @@ def carregar_clientes(
     caminho_planilha: Path,
     abas: tuple[str, ...],
     reprocessar_concluidos: bool = False,
+    reprocessar_pendentes: bool = False,
 ) -> tuple[list[dict], bool]:
     """Lê os clientes via pandas mantendo aba, linha no Excel e status de Etapa."""
     eh_cadastro = caminho_planilha.name.lower() == PLANILHA_PADRAO.name.lower()
@@ -146,6 +147,8 @@ def carregar_clientes(
             if "Etapa" in df.columns and not pd.isna(row.get("Etapa")):
                 etapa_atual = str(row.get("Etapa")).strip().lower()
             if etapa_atual == "concluido" and not reprocessar_concluidos:
+                continue
+            if etapa_atual == "pendente" and not reprocessar_pendentes:
                 continue
             clientes.append(
                 {
@@ -286,7 +289,9 @@ def aguardar_resultados_juridiq(dlg, timeout_s: int = 12) -> None:
     anterior, estavel = -1, 0
     for _ in range(timeout_s * 4):
         atual = dlg.locator("[cmdk-item]").count()
-        vazio = dlg.get_by_text(re.compile(r"nenhum resultado", re.I)).count()
+        vazio = dlg.get_by_text(
+            re.compile(r"nenhum resultado|sem resultado|nada encontrado|não encontrado", re.I)
+        ).count()
         if atual == anterior and (atual > 0 or vazio > 0):
             estavel += 1
             if estavel >= 3:
@@ -736,6 +741,33 @@ def migrar_cliente(
     return avaliar_resultado_migracao(res_origem, res_destino, nome_cliente)
 
 
+def eh_condicao_dados(status: str) -> bool:
+    """Identifica condições de cadastro/dados que devem marcar pendente e seguir o lote."""
+    return status == "Não encontrado" or "ambigu" in status.lower()
+
+
+def eh_erro_critico_global(pg_origem, pg_destino, detalhe: str) -> bool:
+    """Verifica se o navegador desconectou ou se alguma sessão de login expirou."""
+    txt = (detalhe or "").lower()
+    sinais_fatal = (
+        "target page, context or browser has been closed",
+        "browser has been closed",
+        "connection closed",
+        "connect_over_cdp",
+        "econnrefused",
+    )
+    if any(s in txt for s in sinais_fatal):
+        return True
+    try:
+        if pg_origem.is_closed() or pg_destino.is_closed():
+            return True
+        if "/login" in pg_origem.url.lower() or "/login" in pg_destino.url.lower():
+            return True
+    except Exception:
+        return True
+    return False
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Migração em lote de documentos entre AdvBox e Juridiq.")
     parser.add_argument("--arquivo", default=str(PLANILHA_PADRAO), help="Planilha de entrada (.xlsx)")
@@ -748,6 +780,11 @@ def parse_args():
         help="Reprocessa também clientes já marcados como 'concluido' na coluna Etapa",
     )
     parser.add_argument(
+        "--reprocessar-pendentes",
+        action="store_true",
+        help="Reprocessa também clientes já marcados como 'pendente' na coluna Etapa",
+    )
+    parser.add_argument(
         "--novo-navegador",
         action="store_true",
         help="Abre uma nova janela do Chromium (headless=False) para login manual em vez de usar porta 9222",
@@ -755,7 +792,7 @@ def parse_args():
     parser.add_argument(
         "--nao-interativo",
         action="store_true",
-        help="Em caso de erro, exibe o diagnóstico e encerra imediatamente sem perguntar no terminal",
+        help="Em caso de erro crítico ou após retry em lote, não aguarda confirmação no terminal",
     )
     return parser.parse_args()
 
@@ -775,6 +812,7 @@ def main() -> None:
             caminho_planilha,
             tuple(args.abas),
             reprocessar_concluidos=args.reprocessar_concluidos,
+            reprocessar_pendentes=args.reprocessar_pendentes or bool(args.cliente),
         )
     except Exception as ex:
         diag = diagnosticar_problema("planilha", type(ex).__name__, str(ex))
@@ -818,13 +856,15 @@ def main() -> None:
             for pos, cli in enumerate(clientes, start=1):
                 nome = cli["nome_cliente"]
                 indice_reg = None
+                tentativa_auto = 1
                 while True:
                     logger.info(
-                        "[%d/%d] Processando (%s linha %d): %s",
+                        "[%d/%d] Processando (%s linha %d, tentativa %d): %s",
                         pos,
                         len(clientes),
                         cli["aba"],
                         cli["linha_excel"],
+                        tentativa_auto,
                         nome,
                     )
                     try:
@@ -883,6 +923,48 @@ def main() -> None:
                     )
 
                     if etapa == "concluido":
+                        break
+
+                    # Condições de dados (não encontrado, ambiguidade, nuvem vazia) avançam o lote sem travar
+                    if eh_condicao_dados(reg["status"]):
+                        diag = diagnosticar_problema("migracao", reg["status"], reg["observacao"])
+                        logger.warning(
+                            "[%d/%d] %s marcado como 'pendente' (%s). Avançando para o próximo cliente.",
+                            pos,
+                            len(clientes),
+                            nome,
+                            diag["titulo"],
+                        )
+                        break
+
+                    # Erro crítico/global (navegador fechado ou sessão deslogada) para o script imediatamente
+                    if eh_erro_critico_global(pg_origem, pg_destino, reg["observacao"]):
+                        diag = diagnosticar_problema("migracao", reg["status"], reg["observacao"])
+                        exibir_painel_erro(f"{nome} ({cli['aba']} linha {cli['linha_excel']})", diag, logger)
+                        parar_lote = True
+                        break
+
+                    # Erro técnico transitório: tenta automaticamente mais 1 vez antes de marcar pendente e seguir
+                    if tentativa_auto < 2:
+                        tentativa_auto += 1
+                        logger.warning(
+                            "[%d/%d] Falha transitória em %s (%s). Executando tentativa 2/2 automaticamente...",
+                            pos,
+                            len(clientes),
+                            nome,
+                            reg["observacao"],
+                        )
+                        continue
+
+                    if args.nao_interativo or not sys.stdin.isatty():
+                        diag = diagnosticar_problema("migracao", reg["status"], reg["observacao"])
+                        exibir_painel_erro(f"{nome} ({cli['aba']} linha {cli['linha_excel']})", diag, logger)
+                        logger.warning(
+                            "[%d/%d] %s manteve falha após tentativa 2/2; registrado como 'pendente' e seguindo lote.",
+                            pos,
+                            len(clientes),
+                            nome,
+                        )
                         break
 
                     acao = tratar_parada_erro(
