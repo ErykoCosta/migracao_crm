@@ -147,6 +147,10 @@ def anexar(pg, arquivos, timeout_s=180, tamanho_lote=5):
             if not faltando:
                 break
             pg.wait_for_timeout(1500)
+        try:
+            _set_input_files_cdp(pg, [])
+        except Exception:
+            pass
         faltando_total.extend(a.name for a in faltando)
     return faltando_total
 

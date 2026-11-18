@@ -11,11 +11,19 @@ def limpa(nome: str) -> str:
     return nome or "sem_nome"
 
 
-def unico(pasta: Path, nome: str) -> Path:
+def unico(pasta: Path, nome: str, usados: set[str] | None = None) -> Path:
+    """Resolve conflito de nomes dentro da mesma pasta da coleta (ou no disco se usados=None)."""
     p = pasta / nome
     i = 1
+    if usados is not None:
+        while p.name.casefold() in usados:
+            p = pasta / f"{Path(nome).stem} ({i}){Path(nome).suffix}"
+            i += 1
+        usados.add(p.name.casefold())
+        return p
+
     while p.exists():
-        p = pasta / f"{p.stem} ({i}){p.suffix}"
+        p = pasta / f"{Path(nome).stem} ({i}){Path(nome).suffix}"
         i += 1
     return p
 
@@ -130,13 +138,14 @@ def coletar(pg, ctx, destino: Path, log=print, nivel=0):
             log(f"{ind}  ERRO pasta {nome_pasta}: {ex}")
 
     # 2) arquivos soltos
+    usados: set[str] = set()
     for nome, url in arquivos:
         listados += 1
         try:
             r = ctx.request.get(url)
             if not r.ok:
                 raise RuntimeError(f"HTTP {r.status}")
-            unico(destino, limpa(nome)).write_bytes(r.body())
+            unico(destino, limpa(nome), usados).write_bytes(r.body())
             baixados += 1
             log(f"{ind}  OK  {nome}")
         except Exception as ex:

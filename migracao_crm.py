@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import unicodedata
 from pathlib import Path
 
@@ -187,16 +188,24 @@ def aguardar_resultados_advbox(pg, timeout_s: int = 15) -> None:
 
 
 def limpar_pasta_cliente(pasta: Path) -> None:
-    """Garante pasta isolada limpa removendo apenas itens internos (evita WinError 5 no rmdir)."""
+    """Garante pasta isolada limpa tentando até 5x caso o Windows ainda segure algum arquivo."""
     if pasta.exists():
-        for item in list(pasta.iterdir()):
-            if item.is_dir():
-                shutil.rmtree(item, ignore_errors=True)
-            else:
-                try:
-                    item.unlink(missing_ok=True)
-                except OSError:
-                    pass
+        for tentativa in range(5):
+            restantes = False
+            for item in list(pasta.iterdir()):
+                if item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+                    if item.exists():
+                        restantes = True
+                else:
+                    try:
+                        item.unlink(missing_ok=True)
+                    except OSError:
+                        restantes = True
+            if not restantes:
+                break
+            if tentativa < 4:
+                time.sleep(0.4)
     pasta.mkdir(parents=True, exist_ok=True)
 
 
