@@ -183,11 +183,23 @@ def aguardar_resultados_advbox(pg, timeout_s: int = 15) -> None:
         pg.wait_for_timeout(250)
 
 
+def limpar_pasta_cliente(pasta: Path) -> None:
+    """Garante pasta isolada limpa removendo apenas itens internos (evita WinError 5 no rmdir)."""
+    if pasta.exists():
+        for item in list(pasta.iterdir()):
+            if item.is_dir():
+                shutil.rmtree(item, ignore_errors=True)
+            else:
+                try:
+                    item.unlink(missing_ok=True)
+                except OSError:
+                    pass
+    pasta.mkdir(parents=True, exist_ok=True)
+
+
 def buscar_e_baixar_origem(pg, ctx, url_origem: str, nome_cliente: str, pasta_cliente: Path, log) -> dict:
     """Executa busca com regra de homônimos e baixa arquivos recursivamente na Origem (AdvBox)."""
-    if pasta_cliente.exists():
-        shutil.rmtree(pasta_cliente)
-    pasta_cliente.mkdir(parents=True, exist_ok=True)
+    limpar_pasta_cliente(pasta_cliente)
 
     pg.bring_to_front()
     fechar_antigo = pg.locator("a.button-close-popup:visible")
@@ -327,13 +339,11 @@ def buscar_e_enviar_destino(pg, url_destino: str, nome_cliente: str, pasta_clien
                 "observacao": f"Destino (2ª busca): {obs2}",
             }
 
-    pg.wait_for_url(re.compile(r"/people/"), timeout=15000)
-    aba = pg.get_by_role("tab", name="Arquivos")
-    if aba.count() == 0:
-        aba = pg.get_by_text("Arquivos", exact=True)
-    aba.first.click()
-    pg.wait_for_url(re.compile(r"tab=arquivos"), timeout=15000)
-    pg.locator("#files-list").first.wait_for(timeout=15000)
+    pg.wait_for_url(re.compile(r"/people/"), timeout=15000, wait_until="commit")
+    aba = pg.get_by_role("tab", name="Arquivos").or_(pg.locator("main").get_by_text("Arquivos", exact=True)).first
+    aba.wait_for(state="visible", timeout=15000)
+    aba.click()
+    pg.locator("#files-list").first.wait_for(state="visible", timeout=15000)
     pg.wait_for_timeout(2000)
 
     docs_esp, docs_conf, pastas_esp, pastas_conf, erros = enviar_e_verificar_cliente(pg, pasta_cliente, log=log)
@@ -390,7 +400,9 @@ def diagnosticar_problema(contexto: str, erro_ou_status: str, detalhe: str = "")
             ],
         }
 
-    if "permission" in texto_completo or "permissionerror" in texto_completo or contexto == "planilha":
+    if contexto == "planilha" or (
+        ".xlsx" in texto_completo and ("permission" in texto_completo or "acesso negado" in texto_completo)
+    ):
         return {
             "titulo": "Planilha bloqueada ou inacessível",
             "o_que_ocorreu": (
@@ -703,7 +715,24 @@ def migrar_cliente(
     if not res_origem["ok"]:
         return avaliar_resultado_migracao(res_origem, None, nome_cliente)
 
-    res_destino = buscar_e_enviar_destino(pg_destino, url_destino, nome_cliente, pasta_cliente, logger.info)
+    try:
+        res_destino = buscar_e_enviar_destino(pg_destino, url_destino, nome_cliente, pasta_cliente, logger.info)
+    except Exception as ex:
+        logger.exception("Erro inesperado no destino ao processar %s", nome_cliente)
+        return (
+            "pendente",
+            {
+                "nome_cliente": nome_cliente,
+                "status": "Erro",
+                "arquivos_transferidos": 0,
+                "observacao": f"{type(ex).__name__}: {ex}",
+            },
+            {
+                "docs_origem": res_origem["resumo_origem"],
+                "docs_destino": "",
+                "obs": f"Erro no destino: {type(ex).__name__}",
+            },
+        )
     return avaliar_resultado_migracao(res_origem, res_destino, nome_cliente)
 
 

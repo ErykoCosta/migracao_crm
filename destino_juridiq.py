@@ -33,10 +33,12 @@ def abrir_arquivos_cliente(pg, nome):
         exatos.first.click()
     else:
         cli.first.click()
-    pg.wait_for_url(re.compile(r"/people/"), timeout=15000)
-    pg.get_by_role("tab", name="Arquivos").first.click()
-    pg.wait_for_url(re.compile(r"tab=arquivos"), timeout=15000)
-    pg.wait_for_timeout(2500)
+    pg.wait_for_url(re.compile(r"/people/"), timeout=15000, wait_until="commit")
+    aba = pg.get_by_role("tab", name="Arquivos").or_(pg.locator("main").get_by_text("Arquivos", exact=True)).first
+    aba.wait_for(state="visible", timeout=15000)
+    aba.click()
+    pg.locator("#files-list").first.wait_for(state="visible", timeout=15000)
+    pg.wait_for_timeout(2000)
     return "ok", 1
 
 
@@ -66,26 +68,87 @@ def arquivos_na_lista(pg) -> set[str]:
 
 
 def _nome_ja_anexado(nome_arquivo: str, existentes: set[str]) -> bool:
-    """Compara o nome completo do arquivo (incluindo extensão) de forma exata e case-insensitive."""
+    """Compara o nome completo do arquivo (tratando truncamento de 80 chars do Juridiq)."""
     alvo = nome_arquivo.strip()
     if alvo in existentes:
         return True
     alvo_cf = alvo.casefold()
-    return any(ex.strip().casefold() == alvo_cf for ex in existentes)
+    if any(ex.strip().casefold() == alvo_cf for ex in existentes):
+        return True
+    if len(alvo) > 80:
+        alvo_p = Path(alvo)
+        alvo_stem = alvo_p.stem.casefold()
+        alvo_suf = alvo_p.suffix.casefold()
+        for ex in existentes:
+            ex_p = Path(ex.strip())
+            ex_stem = ex_p.stem.casefold()
+            if ex_p.suffix.casefold() == alvo_suf and len(ex_stem) >= 70 and alvo_stem.startswith(ex_stem):
+                return True
+    return False
 
 
-def anexar(pg, arquivos, timeout_s=180):
-    """Anexa vários arquivos pelo input da dropzone e espera todos aparecerem com nome exato na lista."""
-    pg.locator('input[type="file"][multiple]').first.set_input_files([str(a) for a in arquivos])
-    fim = time.time() + timeout_s
-    faltando = list(arquivos)
-    while time.time() < fim:
-        existentes = arquivos_na_lista(pg)
-        faltando = [a for a in arquivos if not _nome_ja_anexado(Path(a).name, existentes)]
-        if not faltando:
-            return []
-        pg.wait_for_timeout(1500)
-    return [Path(a).name for a in faltando]
+def _agrupar_lotes(arquivos, max_arquivos=5, max_bytes=35 * 1024 * 1024):
+    """Agrupa arquivos respeitando limite de quantidade e tamanho total por lote."""
+    lotes: list[list[Path]] = []
+    lote_atual: list[Path] = []
+    bytes_atual = 0
+    for arq in arquivos:
+        p = Path(arq)
+        tam = p.stat().st_size if p.exists() else 0
+        if lote_atual and (len(lote_atual) >= max_arquivos or bytes_atual + tam > max_bytes):
+            lotes.append(lote_atual)
+            lote_atual = []
+            bytes_atual = 0
+        lote_atual.append(p)
+        bytes_atual += tam
+    if lote_atual:
+        lotes.append(lote_atual)
+    return lotes
+
+
+def _set_input_files_cdp(pg, caminhos: list[str]) -> None:
+    """Passa os caminhos locais diretamente via CDP (sem transferir bytes nem limite de 50 MB)."""
+    cdp = pg.context.new_cdp_session(pg)
+    try:
+        doc = cdp.send("DOM.getDocument", {"depth": 0})
+        res = cdp.send(
+            "DOM.querySelector",
+            {"nodeId": doc["root"]["nodeId"], "selector": 'input[type="file"][multiple]'},
+        )
+        node_id = res.get("nodeId")
+        if not node_id:
+            raise RuntimeError("Input de upload não encontrado no DOM via CDP")
+        cdp.send("DOM.setFileInputFiles", {"nodeId": node_id, "files": caminhos})
+    finally:
+        try:
+            cdp.detach()
+        except Exception:
+            pass
+
+
+def anexar(pg, arquivos, timeout_s=180, tamanho_lote=5):
+    """Anexa arquivos em sub-lotes pelo input da dropzone e confirma o aparecimento na lista."""
+    faltando_total: list[str] = []
+    for lote in _agrupar_lotes(arquivos, max_arquivos=tamanho_lote):
+        caminhos = [str(a.resolve()) for a in lote]
+        try:
+            _set_input_files_cdp(pg, caminhos)
+        except Exception:
+            inp = pg.locator('input[type="file"][multiple]').first
+            inp.set_input_files(caminhos, timeout=120000)
+        pg.wait_for_timeout(500)
+        bytes_lote = sum(a.stat().st_size for a in lote if a.exists())
+        espera_s = max(timeout_s, 180 + int(bytes_lote / (1024 * 1024) * 4))
+        fim = time.time() + espera_s
+        faltando = list(lote)
+        while time.time() < fim:
+            existentes = arquivos_na_lista(pg)
+            faltando = [a for a in lote if not _nome_ja_anexado(a.name, existentes)]
+            if not faltando:
+                break
+            pg.wait_for_timeout(1500)
+        faltando_total.extend(a.name for a in faltando)
+    return faltando_total
 
 
 def _locator_pasta(pg, nome_pasta: str):
