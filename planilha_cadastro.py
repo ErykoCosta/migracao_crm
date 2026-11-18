@@ -1,4 +1,4 @@
-"""Manipulação da planilha PLANILHA DE CADASTRO.xlsx e da coluna Etapa."""
+"""Manipulação da planilha PLANILHA DE CADASTRO.xlsx e das colunas de controle."""
 import shutil
 from copy import copy
 from pathlib import Path
@@ -8,6 +8,12 @@ from openpyxl.utils import get_column_letter
 
 PLANILHA_PADRAO = Path("PLANILHA DE CADASTRO.xlsx")
 ABAS_PADRAO = ("Clientes 2025", "Clientes 2026")
+COLUNAS_CONTROLE = (
+    ("Etapa", 4, 15),
+    ("Documentos origem", 5, 22),
+    ("Documentos destino", 6, 22),
+    ("Obs", 7, 38),
+)
 
 
 def garantir_backup(caminho_planilha: Path | str = PLANILHA_PADRAO) -> Path:
@@ -29,23 +35,24 @@ def _copiar_estilo(origem, destino, incluir_fill: bool = True) -> None:
         destino.number_format = origem.number_format
 
 
-def _encontrar_coluna_etapa(ws) -> int | None:
+def _encontrar_coluna(ws, nome_coluna: str) -> int | None:
+    alvo = nome_coluna.strip().casefold()
     for col in range(1, ws.max_column + 1):
         val = ws.cell(row=1, column=col).value
-        if val is not None and str(val).strip().casefold() == "etapa":
+        if val is not None and str(val).strip().casefold() == alvo:
             return col
     return None
 
 
-def garantir_coluna_etapa(
+def garantir_colunas_controle(
     caminho_planilha: Path | str = PLANILHA_PADRAO,
     abas: tuple[str, ...] = ABAS_PADRAO,
-) -> dict[str, int]:
-    """Garante a existência da coluna 'Etapa' nas abas informadas e retorna seus índices."""
+) -> dict[str, dict[str, int]]:
+    """Garante as colunas Etapa, Documentos origem, Documentos destino e Obs nas abas."""
     caminho = Path(caminho_planilha)
     garantir_backup(caminho)
     wb = openpyxl.load_workbook(caminho)
-    colunas: dict[str, int] = {}
+    mapa: dict[str, dict[str, int]] = {}
     alterado = False
 
     try:
@@ -53,24 +60,42 @@ def garantir_coluna_etapa(
             if aba not in wb.sheetnames:
                 continue
             ws = wb[aba]
-            col = _encontrar_coluna_etapa(ws)
-            if col is None:
-                col = 4 if ws.cell(row=1, column=4).value is None else ws.max_column + 1
-                header = ws.cell(row=1, column=col, value="Etapa")
-                ref_header = ws.cell(row=1, column=3)
-                _copiar_estilo(ref_header, header, incluir_fill=True)
-                letra = get_column_letter(col)
-                ws.column_dimensions[letra].width = 15
-                if ws.auto_filter and ws.auto_filter.ref:
-                    ws.auto_filter.ref = f"A1:{letra}{ws.max_row}"
+            cols_aba: dict[str, int] = {}
+            max_col = 3
+            for nome_col, pos_padrao, largura in COLUNAS_CONTROLE:
+                col = _encontrar_coluna(ws, nome_col)
+                if col is None:
+                    col = pos_padrao if ws.cell(row=1, column=pos_padrao).value is None else ws.max_column + 1
+                    header = ws.cell(row=1, column=col, value=nome_col)
+                    _copiar_estilo(ws.cell(row=1, column=3), header, incluir_fill=True)
+                    ws.column_dimensions[get_column_letter(col)].width = largura
+                    alterado = True
+                cols_aba[nome_col] = col
+                if col > max_col:
+                    max_col = col
+
+            letra_max = get_column_letter(max_col)
+            filtro_esperado = f"A1:{letra_max}{ws.max_row}"
+            if ws.auto_filter and ws.auto_filter.ref and ws.auto_filter.ref != filtro_esperado:
+                ws.auto_filter.ref = filtro_esperado
                 alterado = True
-            colunas[aba] = col
+
+            mapa[aba] = cols_aba
 
         if alterado:
             wb.save(caminho)
     finally:
         wb.close()
-    return colunas
+    return mapa
+
+
+def garantir_coluna_etapa(
+    caminho_planilha: Path | str = PLANILHA_PADRAO,
+    abas: tuple[str, ...] = ABAS_PADRAO,
+) -> dict[str, int]:
+    """Compatibilidade: garante todas as colunas de controle e retorna os índices de Etapa."""
+    mapa = garantir_colunas_controle(caminho_planilha, abas=abas)
+    return {aba: cols["Etapa"] for aba, cols in mapa.items()}
 
 
 def atualizar_etapa_cliente(
@@ -78,8 +103,11 @@ def atualizar_etapa_cliente(
     aba: str,
     linha_excel: int,
     status_etapa: str,
+    docs_origem: str | None = None,
+    docs_destino: str | None = None,
+    obs: str | None = None,
 ) -> None:
-    """Grava 'concluido' ou 'pendente' na coluna Etapa da linha do cliente e salva a planilha."""
+    """Grava Etapa, Documentos origem, Documentos destino e Obs na linha do cliente."""
     if status_etapa not in ("concluido", "pendente"):
         raise ValueError(f"Status de etapa inválido: {status_etapa!r}")
 
@@ -88,22 +116,32 @@ def atualizar_etapa_cliente(
     wb = openpyxl.load_workbook(caminho)
     try:
         ws = wb[aba]
-        col = _encontrar_coluna_etapa(ws)
-        if col is None:
+        cols = {nome: _encontrar_coluna(ws, nome) for nome, _, _ in COLUNAS_CONTROLE}
+        if any(v is None for v in cols.values()):
             wb.close()
-            colunas = garantir_coluna_etapa(caminho, abas=(aba,))
-            col = colunas[aba]
+            mapa = garantir_colunas_controle(caminho, abas=(aba,))
+            cols = mapa[aba]
             wb = openpyxl.load_workbook(caminho)
             ws = wb[aba]
 
-        cel_destino = ws.cell(row=linha_excel, column=col, value=status_etapa)
         cel_ref = ws.cell(row=linha_excel, column=3)
-        _copiar_estilo(cel_ref, cel_destino, incluir_fill=False)
+        valores = [("Etapa", status_etapa)]
+        if docs_origem is not None:
+            valores.append(("Documentos origem", docs_origem))
+        if docs_destino is not None:
+            valores.append(("Documentos destino", docs_destino))
+        if obs is not None:
+            valores.append(("Obs", obs))
+
+        for nome_col, valor in valores:
+            cel = ws.cell(row=linha_excel, column=cols[nome_col], value=valor)
+            _copiar_estilo(cel_ref, cel, incluir_fill=False)
+
         wb.save(caminho)
     finally:
         wb.close()
 
 
 if __name__ == "__main__":
-    cols = garantir_coluna_etapa()
-    print("Coluna Etapa garantida:", cols)
+    mapa = garantir_colunas_controle()
+    print("Colunas de controle garantidas:", mapa)

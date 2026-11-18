@@ -12,9 +12,20 @@ import pandas as pd
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
-from coleta_nuvem import coletar, esperar_lista, limpa
-from destino_juridiq import enviar_cliente
-from planilha_cadastro import ABAS_PADRAO, PLANILHA_PADRAO, atualizar_etapa_cliente, garantir_coluna_etapa
+from coleta_nuvem import (
+    coletar,
+    contar_estrutura_local,
+    esperar_lista,
+    formatar_resumo_docs,
+    limpa,
+)
+from destino_juridiq import enviar_e_verificar_cliente
+from planilha_cadastro import (
+    ABAS_PADRAO,
+    PLANILHA_PADRAO,
+    atualizar_etapa_cliente,
+    garantir_colunas_controle,
+)
 
 ORIGEM_URL_PADRAO = "https://app.advbox.com.br/"
 DESTINO_URL_PADRAO = "https://dashboard.juridiq.com.br/"
@@ -110,7 +121,7 @@ def carregar_clientes(
     """Lê os clientes via pandas mantendo aba, linha no Excel e status de Etapa."""
     eh_cadastro = caminho_planilha.name.lower() == PLANILHA_PADRAO.name.lower()
     if eh_cadastro:
-        garantir_coluna_etapa(caminho_planilha, abas=abas)
+        garantir_colunas_controle(caminho_planilha, abas=abas)
         xl = pd.ExcelFile(caminho_planilha, engine="openpyxl")
         abas_alvo = [a for a in abas if a in xl.sheet_names]
     else:
@@ -201,7 +212,15 @@ def buscar_e_baixar_origem(pg, ctx, url_origem: str, nome_cliente: str, pasta_cl
         verificar_chips_advbox=True,
     )
     if st != "OK":
-        return {"ok": False, "status": st, "arquivos": 0, "observacao": f"Origem: {obs}"}
+        return {
+            "ok": False,
+            "status": st,
+            "arquivos": 0,
+            "baixados": 0,
+            "pastas": 0,
+            "resumo_origem": "",
+            "observacao": f"Origem: {obs}",
+        }
 
     pg.locator(".popup-content").first.wait_for(timeout=15000)
     pg.wait_for_timeout(1200)
@@ -209,6 +228,8 @@ def buscar_e_baixar_origem(pg, ctx, url_origem: str, nome_cliente: str, pasta_cl
     esperar_lista(pg)
 
     listados, baixados, erros = coletar(pg, ctx, pasta_cliente, log=log)
+    _, pastas_locais = contar_estrutura_local(pasta_cliente)
+    resumo_origem = formatar_resumo_docs(listados, pastas_locais)
 
     fechar = pg.locator("a.button-close-popup:visible")
     if fechar.count():
@@ -220,16 +241,30 @@ def buscar_e_baixar_origem(pg, ctx, url_origem: str, nome_cliente: str, pasta_cl
             "ok": False,
             "status": "Não encontrado",
             "arquivos": 0,
+            "baixados": 0,
+            "pastas": pastas_locais,
+            "resumo_origem": resumo_origem,
             "observacao": "Origem: nenhum documento na nuvem do cliente",
         }
     if baixados != listados or erros:
         return {
             "ok": False,
             "status": "Erro no download",
-            "arquivos": baixados,
+            "arquivos": listados,
+            "baixados": baixados,
+            "pastas": pastas_locais,
+            "resumo_origem": resumo_origem,
             "observacao": f"Origem: baixados {baixados}/{listados} ({'; '.join(erros[:3])})",
         }
-    return {"ok": True, "status": "Baixado", "arquivos": baixados, "observacao": obs}
+    return {
+        "ok": True,
+        "status": "Baixado",
+        "arquivos": listados,
+        "baixados": baixados,
+        "pastas": pastas_locais,
+        "resumo_origem": resumo_origem,
+        "observacao": obs,
+    }
 
 
 def aguardar_resultados_juridiq(dlg, timeout_s: int = 12) -> None:
@@ -266,7 +301,15 @@ def buscar_e_enviar_destino(pg, url_destino: str, nome_cliente: str, pasta_clien
     st1, _, obs1 = selecionar_resultado_homonimos(dlg.locator("[cmdk-item]"), nome_cliente, extrair_juridiq)
     if st1 != "OK":
         pg.keyboard.press("Escape")
-        return {"ok": False, "status": st1, "arquivos": 0, "observacao": f"Destino (1ª busca): {obs1}"}
+        return {
+            "ok": False,
+            "status": st1,
+            "arquivos": 0,
+            "pastas": 0,
+            "resumo_destino": "",
+            "erros": [obs1],
+            "observacao": f"Destino (1ª busca): {obs1}",
+        }
 
     pg.wait_for_timeout(2000)
     if "/people/" not in pg.url:
@@ -274,7 +317,15 @@ def buscar_e_enviar_destino(pg, url_destino: str, nome_cliente: str, pasta_clien
         st2, _, obs2 = selecionar_resultado_homonimos(cli, nome_cliente, extrair_juridiq)
         if st2 != "OK":
             pg.keyboard.press("Escape")
-            return {"ok": False, "status": st2, "arquivos": 0, "observacao": f"Destino (2ª busca): {obs2}"}
+            return {
+                "ok": False,
+                "status": st2,
+                "arquivos": 0,
+                "pastas": 0,
+                "resumo_destino": "",
+                "erros": [obs2],
+                "observacao": f"Destino (2ª busca): {obs2}",
+            }
 
     pg.wait_for_url(re.compile(r"/people/"), timeout=15000)
     aba = pg.get_by_role("tab", name="Arquivos")
@@ -285,19 +336,29 @@ def buscar_e_enviar_destino(pg, url_destino: str, nome_cliente: str, pasta_clien
     pg.locator("#files-list").first.wait_for(timeout=15000)
     pg.wait_for_timeout(2000)
 
-    esperados, enviados, erros = enviar_cliente(pg, pasta_cliente, log=log)
-    if enviados == esperados and not erros:
+    docs_esp, docs_conf, pastas_esp, pastas_conf, erros = enviar_e_verificar_cliente(pg, pasta_cliente, log=log)
+    resumo_destino = formatar_resumo_docs(docs_conf, pastas_conf)
+    if docs_conf == docs_esp and pastas_conf == pastas_esp and not erros:
         return {
             "ok": True,
             "status": "Concluído",
-            "arquivos": enviados,
-            "observacao": f"Migrados/verificados {enviados}/{esperados} arquivo(s) sem duplicidade",
+            "arquivos": docs_conf,
+            "pastas": pastas_conf,
+            "resumo_destino": resumo_destino,
+            "erros": [],
+            "observacao": f"Migrados/verificados {resumo_destino} sem duplicidade",
         }
     return {
         "ok": False,
         "status": "Erro no upload",
-        "arquivos": enviados,
-        "observacao": f"Destino: enviados {enviados}/{esperados} ({'; '.join(erros[:3])})",
+        "arquivos": docs_conf,
+        "pastas": pastas_conf,
+        "resumo_destino": resumo_destino,
+        "erros": erros,
+        "observacao": (
+            f"Destino: {docs_conf}/{docs_esp} docs e {pastas_conf}/{pastas_esp} pastas "
+            f"({'; '.join(erros[:3])})"
+        ),
     }
 
 
@@ -468,6 +529,7 @@ def exibir_painel_erro(titulo_contexto: str, diag: dict, logger: logging.Logger)
 def tratar_parada_erro(
     cli: dict,
     reg: dict,
+    dados_planilha: dict,
     caminho_planilha: Path,
     eh_cadastro: bool,
     registros: list[dict],
@@ -503,7 +565,15 @@ def tratar_parada_erro(
         salvar_relatorio(registros)
         if eh_cadastro:
             try:
-                atualizar_etapa_cliente(caminho_planilha, cli["aba"], cli["linha_excel"], "concluido")
+                atualizar_etapa_cliente(
+                    caminho_planilha,
+                    cli["aba"],
+                    cli["linha_excel"],
+                    "concluido",
+                    docs_origem=dados_planilha.get("docs_origem"),
+                    docs_destino=dados_planilha.get("docs_destino"),
+                    obs="Concluído manualmente pelo usuário",
+                )
             except PermissionError:
                 diag_perm = diagnosticar_problema("planilha", "PermissionError", str(caminho_planilha))
                 exibir_painel_erro("Gravação na planilha", diag_perm, logger)
@@ -514,6 +584,109 @@ def tratar_parada_erro(
     return "parar"
 
 
+def avaliar_resultado_migracao(res_origem: dict, res_destino: dict | None, nome_cliente: str) -> tuple[str, dict, dict]:
+    """Confere igualdade Origem vs Destino e monta relatório + colunas da planilha."""
+    if not res_origem["ok"]:
+        st = res_origem["status"]
+        obs_bruta = res_origem["observacao"]
+        if "nenhum documento na nuvem" in obs_bruta.lower():
+            obs_planilha = "Cliente sem documentos no CRM de Origem"
+        elif st == "Não encontrado":
+            obs_planilha = "Cliente não encontrado no CRM de Origem"
+        elif "ambigu" in st.lower():
+            obs_planilha = obs_bruta.replace("Origem: ", "Ambiguidade na Origem: ")
+        elif st == "Erro no download":
+            falt = max(0, res_origem["arquivos"] - res_origem.get("baixados", 0))
+            if falt > 0:
+                doc_txt = "documento" if falt == 1 else "documentos"
+                obs_planilha = f"{falt} {doc_txt} com erro ao baixar da origem"
+            else:
+                obs_planilha = obs_bruta
+        else:
+            obs_planilha = obs_bruta
+
+        return (
+            "pendente",
+            {
+                "nome_cliente": nome_cliente,
+                "status": st,
+                "arquivos_transferidos": res_origem.get("baixados", 0),
+                "observacao": obs_bruta,
+            },
+            {
+                "docs_origem": res_origem.get("resumo_origem", ""),
+                "docs_destino": "",
+                "obs": obs_planilha,
+            },
+        )
+
+    assert res_destino is not None
+    docs_orig = res_origem["arquivos"]
+    pastas_orig = res_origem["pastas"]
+    docs_dest = res_destino["arquivos"]
+    pastas_dest = res_destino["pastas"]
+    erros_dest = res_destino.get("erros") or []
+
+    tudo_igual = (
+        res_destino["ok"]
+        and docs_orig == docs_dest
+        and pastas_orig == pastas_dest
+        and len(erros_dest) == 0
+    )
+
+    if tudo_igual:
+        return (
+            "concluido",
+            {
+                "nome_cliente": nome_cliente,
+                "status": "Concluído",
+                "arquivos_transferidos": docs_dest,
+                "observacao": res_destino["observacao"],
+            },
+            {
+                "docs_origem": res_origem["resumo_origem"],
+                "docs_destino": res_destino["resumo_destino"],
+                "obs": "",
+            },
+        )
+
+    st_dest = res_destino["status"]
+    if st_dest == "Não encontrado":
+        obs_planilha = "Cliente não encontrado no CRM de Destino"
+    elif "ambigu" in st_dest.lower():
+        obs_planilha = res_destino["observacao"].replace("Destino", "Ambiguidade no Destino")
+    else:
+        partes: list[str] = []
+        diff_docs = max(0, docs_orig - docs_dest)
+        diff_pastas = max(0, pastas_orig - pastas_dest)
+        if diff_docs > 0:
+            doc_txt = "documento" if diff_docs == 1 else "documentos"
+            partes.append(f"{diff_docs} {doc_txt} com erro de migração")
+        if diff_pastas > 0:
+            pasta_txt = "pasta" if diff_pastas == 1 else "pastas"
+            partes.append(f"{diff_pastas} {pasta_txt} com erro de migração")
+        if not partes:
+            partes.append("; ".join(erros_dest[:2]) if erros_dest else res_destino["observacao"])
+        obs_planilha = "; ".join(partes)
+
+    return (
+        "pendente",
+        {
+            "nome_cliente": nome_cliente,
+            "status": "Erro no upload" if st_dest == "Concluído" else st_dest,
+            "arquivos_transferidos": docs_dest,
+            "observacao": f"Origem ({res_origem['resumo_origem']}) != Destino ({res_destino['resumo_destino']}): {obs_planilha}"
+            if st_dest == "Concluído"
+            else res_destino["observacao"],
+        },
+        {
+            "docs_origem": res_origem["resumo_origem"],
+            "docs_destino": res_destino.get("resumo_destino", ""),
+            "obs": obs_planilha,
+        },
+    )
+
+
 def migrar_cliente(
     ctx,
     pg_origem,
@@ -522,27 +695,16 @@ def migrar_cliente(
     url_destino: str,
     nome_cliente: str,
     logger: logging.Logger,
-) -> tuple[str, dict]:
-    """Executa o fluxo Origem -> Destino para um cliente. Retorna (etapa, registro_relatorio)."""
+) -> tuple[str, dict, dict]:
+    """Executa o fluxo Origem -> Destino e retorna (etapa, registro_relatorio, dados_planilha)."""
     pasta_cliente = PASTA_DOWNLOADS / limpa(nome_cliente)
 
     res_origem = buscar_e_baixar_origem(pg_origem, ctx, url_origem, nome_cliente, pasta_cliente, logger.info)
     if not res_origem["ok"]:
-        return "pendente", {
-            "nome_cliente": nome_cliente,
-            "status": res_origem["status"],
-            "arquivos_transferidos": res_origem["arquivos"],
-            "observacao": res_origem["observacao"],
-        }
+        return avaliar_resultado_migracao(res_origem, None, nome_cliente)
 
     res_destino = buscar_e_enviar_destino(pg_destino, url_destino, nome_cliente, pasta_cliente, logger.info)
-    etapa = "concluido" if res_destino["ok"] else "pendente"
-    return etapa, {
-        "nome_cliente": nome_cliente,
-        "status": res_destino["status"],
-        "arquivos_transferidos": res_destino["arquivos"],
-        "observacao": res_destino["observacao"],
-    }
+    return avaliar_resultado_migracao(res_origem, res_destino, nome_cliente)
 
 
 def parse_args():
@@ -637,7 +799,7 @@ def main() -> None:
                         nome,
                     )
                     try:
-                        etapa, reg = migrar_cliente(
+                        etapa, reg, dados_planilha = migrar_cliente(
                             ctx, pg_origem, pg_destino, url_origem, url_destino, nome, logger
                         )
                     except Exception as ex:
@@ -649,6 +811,11 @@ def main() -> None:
                             "arquivos_transferidos": 0,
                             "observacao": f"{type(ex).__name__}: {ex}",
                         }
+                        dados_planilha = {
+                            "docs_origem": "",
+                            "docs_destino": "",
+                            "obs": f"Erro inesperado na migração: {ex}",
+                        }
 
                     if indice_reg is None:
                         registros.append(reg)
@@ -659,7 +826,15 @@ def main() -> None:
                     try:
                         salvar_relatorio(registros)
                         if eh_cadastro:
-                            atualizar_etapa_cliente(caminho_planilha, cli["aba"], cli["linha_excel"], etapa)
+                            atualizar_etapa_cliente(
+                                caminho_planilha,
+                                cli["aba"],
+                                cli["linha_excel"],
+                                etapa,
+                                docs_origem=dados_planilha["docs_origem"],
+                                docs_destino=dados_planilha["docs_destino"],
+                                obs=dados_planilha["obs"],
+                            )
                     except PermissionError as ex:
                         diag = diagnosticar_problema("planilha", "PermissionError", str(ex))
                         exibir_painel_erro(f"Gravação da planilha ({nome})", diag, logger)
@@ -667,14 +842,15 @@ def main() -> None:
                         break
 
                     logger.info(
-                        "[%d/%d] Finalizado %s -> Etapa=%s | Status=%s | Arquivos=%s | %s",
+                        "[%d/%d] Finalizado %s -> Etapa=%s | Status=%s | Origem=%s | Destino=%s | Obs=%s",
                         pos,
                         len(clientes),
                         nome,
                         etapa,
                         reg["status"],
-                        reg["arquivos_transferidos"],
-                        reg["observacao"],
+                        dados_planilha["docs_origem"] or "-",
+                        dados_planilha["docs_destino"] or "-",
+                        dados_planilha["obs"] or "-",
                     )
 
                     if etapa == "concluido":
@@ -683,6 +859,7 @@ def main() -> None:
                     acao = tratar_parada_erro(
                         cli,
                         reg,
+                        dados_planilha,
                         caminho_planilha,
                         eh_cadastro,
                         registros,

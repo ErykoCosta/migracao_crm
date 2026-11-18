@@ -102,61 +102,98 @@ def _entrar_pasta(pg, nome_pasta: str):
         pg.get_by_role("button", name="Nova pasta").click()
         pg.get_by_placeholder("Nome da pasta").fill(nome_pasta)
         pg.get_by_role("button", name="Confirmar").click()
-        pg.wait_for_timeout(2500)
+        _locator_pasta(pg, nome_pasta).first.wait_for(state="visible", timeout=12000)
+        pg.wait_for_timeout(600)
     _locator_pasta(pg, nome_pasta).first.click()
-    pg.wait_for_timeout(2000)
     padrao = re.compile(rf"^\s*{re.escape(nome_pasta.strip())}\s*$", re.I)
-    pg.get_by_text(padrao).first.wait_for(timeout=10000)  # breadcrumb
+    try:
+        _locator_pasta(pg, nome_pasta).first.wait_for(state="hidden", timeout=8000)
+    except Exception:
+        pass
+    pg.get_by_text(padrao).first.wait_for(state="visible", timeout=10000)
+    pg.wait_for_timeout(1200)
 
 
-def _voltar(pg, nome_pasta: str):
-    padrao = nome_pasta.strip().lower()
+def _voltar(pg, nome_pasta: str, pai_pasta: str | None = None):
     upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ"
     lower = "abcdefghijklmnopqrstuvwxyzáàâãéèêíìîóòôõúùûç"
+    atual_cf = nome_pasta.strip().lower()
+    alvo_cf = (pai_pasta or "Arquivos").strip().lower()
     pg.locator(
-        f"xpath=(//*[translate(normalize-space(text()), '{upper}', '{lower}')='{padrao}'])[1]"
-        "/preceding::*[normalize-space(text())='Arquivos'][1]"
+        f"xpath=(//*[translate(normalize-space(text()), '{upper}', '{lower}')='{atual_cf}'])[1]"
+        f"/preceding::*[translate(normalize-space(text()), '{upper}', '{lower}')='{alvo_cf}'][1]"
     ).click()
-    pg.wait_for_timeout(2000)
+    _locator_pasta(pg, nome_pasta).first.wait_for(state="visible", timeout=12000)
+    pg.wait_for_timeout(1200)
 
 
-def enviar_cliente(pg, pasta_local, log=print, nivel=0):
-    """Espelha pasta_local no cliente aberto, ignorando arquivos já existentes.
+def enviar_e_verificar_cliente(pg, pasta_local, log=print, nivel=0, pai_pasta: str | None = None):
+    """Espelha todas as pastas e arquivos de pasta_local no destino sem duplicar e confirma tudo.
 
-    Retorna (esperados, enviados, erros).
+    Retorna (docs_esperados, docs_confirmados, pastas_esperadas, pastas_confirmadas, erros).
     """
     pasta_local = Path(pasta_local)
-    esperados = enviados = 0
-    erros = []
+    docs_esperados = docs_confirmados = 0
+    pastas_esperadas = pastas_confirmadas = 0
+    erros: list[str] = []
     ind = "  " * nivel
     subpastas = sorted(d for d in pasta_local.iterdir() if d.is_dir())
     arquivos = sorted(f for f in pasta_local.iterdir() if f.is_file())
 
+    pastas_esperadas += len(subpastas)
     for sp in subpastas:
         log(f"{ind}pasta: {sp.name}")
         try:
             _entrar_pasta(pg, sp.name)
-            e, s, er = enviar_cliente(pg, sp, log, nivel + 1)
-            esperados += e
-            enviados += s
-            erros += er
-            _voltar(pg, sp.name)
+            de, dc, pe, pc, er = enviar_e_verificar_cliente(
+                pg,
+                sp,
+                log=log,
+                nivel=nivel + 1,
+                pai_pasta=sp.name,
+            )
+            docs_esperados += de
+            docs_confirmados += dc
+            pastas_esperadas += pe
+            pastas_confirmadas += pc
+            erros.extend(er)
+            _voltar(pg, sp.name, pai_pasta=pai_pasta)
+            if _existe_na_lista(pg, sp.name):
+                pastas_confirmadas += 1
+            else:
+                erros.append(f"pasta não confirmada no destino: {sp.name}")
         except Exception as ex:
             erros.append(f"pasta {sp.name}: {ex}")
             log(f"{ind}ERRO pasta {sp.name}: {ex}")
-            return esperados, enviados, erros
+            return docs_esperados, docs_confirmados, pastas_esperadas, pastas_confirmadas, erros
 
-    esperados += len(arquivos)
+    docs_esperados += len(arquivos)
     existentes = arquivos_na_lista(pg)
     ja_presentes = [a for a in arquivos if _nome_ja_anexado(a.name, existentes)]
     novos = [a for a in arquivos if not _nome_ja_anexado(a.name, existentes)]
     for arq in ja_presentes:
         log(f"{ind}ignorado (já anexo): {arq.name}")
+
     if novos:
         faltando = anexar(pg, novos)
         if faltando:
             erros.append(f"{pasta_local.name}: nao apareceram {faltando}")
-        enviados += len(novos) - len(faltando)
         log(f"{ind}enviados {len(novos) - len(faltando)}/{len(novos)} em '{pasta_local.name}'")
-    enviados += len(ja_presentes)
-    return esperados, enviados, erros
+
+    # Conferência final rigorosa na lista visível da pasta atual
+    existentes_pos = arquivos_na_lista(pg)
+    confirmados_aqui = [a for a in arquivos if _nome_ja_anexado(a.name, existentes_pos)]
+    docs_confirmados += len(confirmados_aqui)
+    if len(confirmados_aqui) != len(arquivos):
+        nao_conf = [a.name for a in arquivos if a not in confirmados_aqui]
+        msg = f"{pasta_local.name}: falta confirmar {nao_conf}"
+        if msg not in erros:
+            erros.append(msg)
+
+    return docs_esperados, docs_confirmados, pastas_esperadas, pastas_confirmadas, erros
+
+
+def enviar_cliente(pg, pasta_local, log=print, nivel=0):
+    """Compatibilidade: retorna (esperados, enviados, erros)."""
+    de, dc, _, _, erros = enviar_e_verificar_cliente(pg, pasta_local, log=log, nivel=nivel)
+    return de, dc, erros
