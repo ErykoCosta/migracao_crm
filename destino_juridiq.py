@@ -6,8 +6,9 @@ from pathlib import Path
 
 def abrir_arquivos_cliente(pg, nome):
     """Busca o cliente e abre a aba Arquivos. Retorna ('ok', n) ou (status, n_resultados)."""
-    pg.goto("https://dashboard.juridiq.com.br/")
-    pg.wait_for_load_state("networkidle")
+    pg.goto("https://dashboard.juridiq.com.br/", wait_until="domcontentloaded")
+    pg.wait_for_load_state("domcontentloaded")
+    pg.locator("#search-bar").wait_for(state="visible", timeout=20000)
     pg.locator("#search-bar").click()
     dlg = pg.locator('[role="dialog"]').first
     dlg.locator("input[cmdk-input]").fill(nome)

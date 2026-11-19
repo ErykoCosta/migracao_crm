@@ -219,10 +219,11 @@ def buscar_e_baixar_origem(pg, ctx, url_origem: str, nome_cliente: str, pasta_cl
         fechar_antigo.first.click()
         pg.wait_for_timeout(400)
 
-    pg.goto(url_origem)
-    pg.wait_for_load_state("networkidle")
+    pg.goto(url_origem, wait_until="domcontentloaded")
+    pg.wait_for_load_state("domcontentloaded")
 
     campo = pg.locator('input[placeholder*="pesquisar" i]').first
+    campo.wait_for(state="visible", timeout=20000)
     campo.click()
     campo.fill("")
     campo.fill(nome_cliente)
@@ -314,9 +315,10 @@ def aguardar_resultados_juridiq(dlg, timeout_s: int = 12) -> None:
 def buscar_e_enviar_destino(pg, url_destino: str, nome_cliente: str, pasta_cliente: Path, log) -> dict:
     """Localiza o cliente no Juridiq com regra de homônimos e envia os arquivos sem duplicar."""
     pg.bring_to_front()
-    pg.goto(url_destino)
-    pg.wait_for_load_state("networkidle")
+    pg.goto(url_destino, wait_until="domcontentloaded")
+    pg.wait_for_load_state("domcontentloaded")
 
+    pg.locator("#search-bar").wait_for(state="visible", timeout=20000)
     pg.locator("#search-bar").click()
     dlg = pg.locator('[role="dialog"]').first
     dlg.wait_for(timeout=10000)
@@ -862,6 +864,7 @@ def main() -> None:
             sys.exit(1)
 
         try:
+            erros_tecnicos_seguidos = 0
             for pos, cli in enumerate(clientes, start=1):
                 nome = cli["nome_cliente"]
                 indice_reg = None
@@ -932,10 +935,12 @@ def main() -> None:
                     )
 
                     if etapa == "concluido":
+                        erros_tecnicos_seguidos = 0
                         break
 
                     # Condições de dados (não encontrado, ambiguidade, nuvem vazia) avançam o lote sem travar
                     if eh_condicao_dados(reg["status"]):
+                        erros_tecnicos_seguidos = 0
                         diag = diagnosticar_problema("migracao", reg["status"], reg["observacao"])
                         logger.warning(
                             "[%d/%d] %s marcado como 'pendente' (%s). Avançando para o próximo cliente.",
@@ -964,6 +969,21 @@ def main() -> None:
                             reg["observacao"],
                         )
                         continue
+
+                    erros_tecnicos_seguidos += 1
+                    if erros_tecnicos_seguidos >= 3:
+                        diag = diagnosticar_problema("migracao", reg["status"], reg["observacao"])
+                        exibir_painel_erro(
+                            f"{nome} ({cli['aba']} linha {cli['linha_excel']}) — 3 erros técnicos seguidos",
+                            diag,
+                            logger,
+                        )
+                        logger.error(
+                            "Lote interrompido por segurança após 3 erros técnicos consecutivos "
+                            "(evita marcar os próximos clientes como pendente)."
+                        )
+                        parar_lote = True
+                        break
 
                     if args.nao_interativo or not sys.stdin.isatty():
                         diag = diagnosticar_problema("migracao", reg["status"], reg["observacao"])
