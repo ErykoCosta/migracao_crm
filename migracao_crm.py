@@ -399,20 +399,24 @@ def diagnosticar_problema(contexto: str, erro_ou_status: str, detalhe: str = "")
     """Traduz erros técnicos e falhas de fluxo para explicação simples e alternativas."""
     texto_completo = f"{contexto} {erro_ou_status} {detalhe}".lower()
 
-    if contexto == "conexao_chrome" or "connect_over_cdp" in texto_completo or "9222" in texto_completo:
+    if (
+        contexto == "conexao_chrome"
+        or "connect_over_cdp" in texto_completo
+        or "9222" in texto_completo
+        or "targetclosederror" in texto_completo
+        or "has been closed" in texto_completo
+    ):
         return {
-            "titulo": "Não foi possível conectar ao Chrome de automação",
+            "titulo": "Aba ou janela do Chrome foi fechada / desconectada",
             "o_que_ocorreu": (
-                "O script tentou se conectar ao Chrome já logado na porta 9222, "
-                "mas não encontrou o navegador aberto nesse modo."
+                "A conexão com o navegador Chrome da automação (porta 9222) ou uma das abas dos CRMs foi fechada durante o processo."
             ),
             "como_identificar": (
-                "Verifique se você abriu o navegador pelo arquivo 'abrir_chrome_9222.bat' "
-                "e se a janela do Chrome continua aberta (um Chrome comum aberto fora do .bat não funciona)."
+                "Verifique se o Chrome aberto pelo 'abrir_chrome_9222.bat' continua aberto e se as abas do AdvBox e do Juridiq continuam abertas e logadas."
             ),
             "alternativas": [
-                "Dê dois cliques em 'abrir_chrome_9222.bat', faça login no AdvBox e no Juridiq e rode 'python migracao_crm.py' novamente.",
-                "Ou rode 'python migracao_crm.py --novo-navegador' para o script abrir um navegador novo e esperar seu login manual.",
+                "Se o Chrome fechou, abra 'abrir_chrome_9222.bat', faça login no AdvBox e no Juridiq e rode 'python migracao_crm.py' novamente.",
+                "Ou rode 'python migracao_crm.py --novo-navegador' para abrir um navegador dedicado e aguardar seu login manual.",
             ],
         }
 
