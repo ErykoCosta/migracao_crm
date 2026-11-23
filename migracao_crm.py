@@ -98,7 +98,8 @@ def selecionar_resultado_homonimos(
         bate = bool(padrao_bruto.match(texto_item) or padrao_norm.match(texto_norm))
         if bate and verificar_chips_advbox:
             chips = [normalizar_texto(c) for c in item.locator("p.title span.mark").all_inner_texts()]
-            if chips and not palavras_alvo.issubset(set(" ".join(chips).split())):
+            palavras_alvo_chips = {p for p in palavras_alvo if p not in {"da", "de", "do", "dos", "das", "e"}}
+            if chips and palavras_alvo_chips and not palavras_alvo_chips.issubset(set(" ".join(chips).split())):
                 bate = False
         if bate:
             correspondencias.append(idx)
@@ -297,12 +298,12 @@ def aguardar_resultados_juridiq(dlg, timeout_s: int = 12) -> None:
     pg = dlg.page
     pg.wait_for_timeout(1500)
     anterior, estavel = -1, 0
-    for _ in range(timeout_s * 4):
+    for iteracao in range(timeout_s * 4):
         atual = dlg.locator("[cmdk-item]").count()
         vazio = dlg.get_by_text(
             re.compile(r"nenhum resultado|sem resultado|nada encontrado|não encontrado", re.I)
         ).count()
-        if atual == anterior and (atual > 0 or vazio > 0):
+        if atual == anterior and (atual > 0 or ((vazio > 0 or iteracao >= 12) and iteracao >= 12)):
             estavel += 1
             if estavel >= 3:
                 return
@@ -319,10 +320,20 @@ def buscar_e_enviar_destino(pg, url_destino: str, nome_cliente: str, pasta_clien
     pg.wait_for_load_state("domcontentloaded")
 
     pg.locator("#search-bar").wait_for(state="visible", timeout=20000)
-    pg.locator("#search-bar").click()
-    dlg = pg.locator('[role="dialog"]').first
+    pg.wait_for_timeout(1200)
+    for _ in range(3):
+        if pg.locator('[role="dialog"]').count() > 0:
+            pg.keyboard.press("Escape")
+            pg.wait_for_timeout(300)
+        else:
+            break
+    pg.locator("#search-bar").click(force=True)
+    dlg = pg.locator('[role="dialog"]:has(input[cmdk-input])').first
     dlg.wait_for(timeout=10000)
-    dlg.locator("input[cmdk-input]").fill(nome_cliente)
+    inp = dlg.locator("input[cmdk-input]")
+    inp.click()
+    inp.fill("")
+    inp.fill(nome_cliente)
     aguardar_resultados_juridiq(dlg)
 
     extrair_juridiq = lambda el: (el.get_attribute("data-value") or el.inner_text()).strip()
@@ -356,6 +367,12 @@ def buscar_e_enviar_destino(pg, url_destino: str, nome_cliente: str, pasta_clien
             }
 
     pg.wait_for_url(re.compile(r"/people/"), timeout=15000, wait_until="commit")
+    for _ in range(3):
+        if pg.locator('[role="dialog"]').count() > 0:
+            pg.keyboard.press("Escape")
+            pg.wait_for_timeout(300)
+        else:
+            break
     aba = pg.get_by_role("tab", name="Arquivos").or_(pg.locator("main").get_by_text("Arquivos", exact=True)).first
     aba.wait_for(state="visible", timeout=15000)
     aba.click()
